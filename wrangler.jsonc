@@ -1,0 +1,17 @@
+{
+  // "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "p2p-shooter",
+  "main": "src/index.js",
+  "compatibility_date": "2026-11-21",
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "run_worker_first": ["/api/*"]
+  },
+  "kv_namespaces": [
+    {
+      "binding": "MATCH_KV",
+      "id": "8d3e46bcdeaf4e689414f480931ccb9d"
+    }
+  ]
+}

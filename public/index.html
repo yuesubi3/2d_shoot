@@ -1,0 +1,530 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>2D Shooter</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #1a1a2e;
+      color: #eee;
+      font-family: 'Segoe UI', sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      gap: 16px;
+    }
+    h1 { font-size: 24px; color: #e94560; }
+    #status {
+      font-size: 16px;
+      padding: 8px 20px;
+      background: #16213e;
+      border-radius: 8px;
+      border: 1px solid #0f3460;
+    }
+    #matchBtn {
+      padding: 12px 32px;
+      font-size: 18px;
+      background: #e94560;
+      color: white;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      font-weight: bold;
+    }
+    #matchBtn:disabled {
+      background: #555;
+      cursor: not-allowed;
+    }
+    #matchBtn:hover:not(:disabled) { background: #c81e45; }
+    canvas {
+      border: 2px solid #0f3460;
+      border-radius: 8px;
+      background: #0a0a1a;
+      cursor: crosshair;
+    }
+    #overlay {
+      position: absolute;
+      top: 0; left: 0; right: 0; bottom: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      pointer-events: none;
+      font-size: 48px;
+      font-weight: bold;
+      text-shadow: 2px 2px 8px black;
+    }
+  </style>
+</head>
+<body>
+  <h1>2Dシューター</h1>
+  <div id="status">待機中...</div>
+  <button id="matchBtn">マッチ開始</button>
+  <div style="position: relative;">
+    <canvas id="game" width="800" height="500"></canvas>
+    <div id="overlay"></div>
+  </div>
+
+  <script src="https://unpkg.com/peerjs@1.5.5/dist/peerjs.min.js"></script>
+  <script>
+    // ==================== ゲーム定数 ====================
+    const W = 800, H = 500;
+    const PLAYER_SIZE = 30;
+    const BULLET_SIZE = 6;
+    const BULLET_SPEED = 8;
+    const PLAYER_SPEED = 4;
+    const MAX_HP = 100;
+    const DAMAGE = 10;
+    const FIRE_COOLDOWN = 200; // ms
+    const HEAL_RATE = 2;        // 1秒あたりの回復量
+    const HEAL_INTERVAL = 1000; // 回復間隔（ms）
+
+    const canvas = document.getElementById("game");
+    const ctx = canvas.getContext("2d");
+    const statusEl = document.getElementById("status");
+    const matchBtn = document.getElementById("matchBtn");
+    const overlay = document.getElementById("overlay");
+
+    // ==================== 状態 ====================
+    let peer = null;
+    let conn = null;
+    let myPeerId = null;
+    let isHost = false;
+    let gameActive = false;
+    let matched = false;
+
+    // ゲーム状態（ホストが権威）
+    let gameState = {
+      p1: { x: 80, y: H / 2, hp: MAX_HP, angle: 0 },   // ホスト（青・左）
+      p2: { x: W - 80, y: H / 2, hp: MAX_HP, angle: Math.PI }, // ゲスト（赤・右）
+      bullets: [],
+      winner: null,
+    };
+
+    // 入力
+    const keys = {};
+    let mouseX = W / 2, mouseY = H / 2;
+    let lastFireTime = 0;
+
+    // 弾の ID 管理（ホスト用）
+    let nextBulletId = 0;
+        // HP自動回復用
+    let lastHealTime = 0;
+
+    // ==================== ユーティリティ ====================
+    function setStatus(msg) {
+      statusEl.textContent = msg;
+    }
+
+    function clamp(v, min, max) {
+      return Math.max(min, Math.min(max, v));
+    }
+
+    // ==================== PeerJS 初期化 ====================
+    function initPeer() {
+      return new Promise((resolve, reject) => {
+        if (peer) { resolve(peer); return; }
+        peer = new Peer(null, { debug: 1 });
+
+        peer.on("open", (id) => {
+          myPeerId = id;
+          console.log("My Peer ID:", id);
+          resolve(peer);
+        });
+
+        peer.on("error", (err) => {
+          console.error("Peer error:", err);
+          setStatus("通信エラー: " + err.type);
+          reject(err);
+        });
+
+        peer.on("connection", (incomingConn) => {
+          // ホスト側：ゲストからの接続を受け入れる
+          if (isHost) {
+            conn = incomingConn;
+            setupConnection();
+          }
+        });
+      });
+    }
+
+    function setupConnection() {
+      conn.on("open", () => {
+        matched = true;
+        gameActive = true;
+        overlay.textContent = "";
+        setStatus(isHost ? "対戦中（あなたはホスト / 青）" : "対戦中（あなたはゲスト / 赤）");
+        matchBtn.disabled = true;
+
+        if (isHost) {
+          // ホストは定期的に状態を送信
+          setInterval(broadcastState, 1000 / 30); // 30fps
+        }
+      });
+
+      conn.on("data", (data) => {
+        if (isHost) {
+          // ホスト：ゲストからの入力を受信
+          if (data.type === "input") {
+            gameState.p2.angle = data.angle;
+            if (data.fire) {
+              spawnBullet(gameState.p2, "p2");
+            }
+          }
+        } else {
+          // ゲスト：ホストからの状態を受信
+          if (data.type === "state") {
+            gameState = data.state;
+            render();
+            // 勝敗確定を受信したら表示
+            if (gameState.winner && !overlay.textContent) {
+              gameActive = false;
+              showResult();
+            }
+          }
+        }
+      });
+
+      conn.on("close", () => {
+        if (gameActive) {
+          gameActive = false;
+          matched = false;
+          setStatus("接続が切れました");
+          overlay.textContent = "切断";
+          matchBtn.disabled = false;
+        }
+      });
+    }
+
+    // ==================== マッチング API ====================
+    async function requestMatch() {
+      setStatus("マッチング中...");
+      matchBtn.disabled = true;
+
+      await initPeer();
+
+      try {
+        const res = await fetch("/api/match", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ peerId: myPeerId }),
+        });
+        const data = await res.json();
+
+        if (data.status === "waiting") {
+          isHost = true; // 待機側がホストになる
+          setStatus("相手を待っています...（ホストとして待機）");
+        } else if (data.status === "matched") {
+          isHost = false; // 後から来た側がゲスト
+          setStatus("相手が見つかりました！接続中...");
+          // 待機していたホストに接続
+          conn = peer.connect(data.targetId, { reliable: true });
+          setupConnection();
+        }
+      } catch (e) {
+        console.error(e);
+        setStatus("マッチング失敗");
+        matchBtn.disabled = false;
+      }
+    }
+
+    async function cancelMatch() {
+      if (myPeerId) {
+        navigator.sendBeacon(
+          "/api/cancel",
+          JSON.stringify({ peerId: myPeerId })
+        );
+      }
+    }
+
+    // ==================== ゲームロジック（ホスト権威） ====================
+    function spawnBullet(player, playerKey) {
+      const now = Date.now();
+      if (now - lastFireTime < FIRE_COOLDOWN) return;
+      lastFireTime = now;
+
+      const angle = player.angle;
+      const bx = player.x + Math.cos(angle) * (PLAYER_SIZE / 2 + 4);
+      const by = player.y + Math.sin(angle) * (PLAYER_SIZE / 2 + 4);
+
+      gameState.bullets.push({
+        id: nextBulletId++,
+        x: bx,
+        y: by,
+        vx: Math.cos(angle) * BULLET_SPEED,
+        vy: Math.sin(angle) * BULLET_SPEED,
+        owner: playerKey,
+      });
+    }
+
+    function updateGame() {
+      if (!isHost || !gameActive) return;
+
+     // ---- HP自動回復（1秒ごとに2）----
+     const now = Date.now();
+    if (now - lastHealTime >= HEAL_INTERVAL) {
+    lastHealTime = now;
+    gameState.p1.hp = Math.min(MAX_HP, gameState.p1.hp + HEAL_RATE);
+    gameState.p2.hp = Math.min(MAX_HP, gameState.p2.hp + HEAL_RATE);
+    }
+
+      // ホスト自身の移動
+      let dx = 0, dy = 0;
+      if (keys["ArrowUp"]) dy -= PLAYER_SPEED;
+      if (keys["ArrowDown"]) dy += PLAYER_SPEED;
+      if (keys["ArrowLeft"]) dx -= PLAYER_SPEED;
+      if (keys["ArrowRight"]) dx += PLAYER_SPEED;
+      gameState.p1.x = clamp(gameState.p1.x + dx, PLAYER_SIZE / 2, W - PLAYER_SIZE / 2);
+      gameState.p1.y = clamp(gameState.p1.y + dy, PLAYER_SIZE / 2, H - PLAYER_SIZE / 2);
+
+      // ホストの照準（マウス方向）
+      gameState.p1.angle = Math.atan2(mouseY - gameState.p1.y, mouseX - gameState.p1.x);
+
+      // ホストの射撃
+      if (Date.now() - lastFireTime >= FIRE_COOLDOWN && keys["_fireHost"]) {
+        spawnBullet(gameState.p1, "p1");
+        keys["_fireHost"] = false;
+      }
+
+      // 弾の更新
+      const bullets = gameState.bullets;
+      for (let i = bullets.length - 1; i >= 0; i--) {
+        const b = bullets[i];
+        b.x += b.vx;
+        b.y += b.vy;
+
+        // 画面外
+        if (b.x < -20 || b.x > W + 20 || b.y < -20 || b.y > H + 20) {
+          bullets.splice(i, 1);
+          continue;
+        }
+
+        // 当たり判定
+        const targets = b.owner === "p1" ? ["p2"] : ["p1"];
+        for (const tKey of targets) {
+          const t = gameState[tKey];
+          const dist = Math.hypot(b.x - t.x, b.y - t.y);
+          if (dist < PLAYER_SIZE / 2 + BULLET_SIZE / 2) {
+            t.hp = Math.max(0, t.hp - DAMAGE);
+            bullets.splice(i, 1);
+            break;
+          }
+        }
+      }
+
+      // 勝敗判定
+      if (gameState.p1.hp <= 0 || gameState.p2.hp <= 0) {
+        if (gameState.p1.hp <= 0 && gameState.p2.hp <= 0) {
+          gameState.winner = "draw";
+        } else if (gameState.p1.hp <= 0) {
+          gameState.winner = "p2";
+        } else {
+          gameState.winner = "p1";
+        }
+        gameActive = false;
+
+        // ゲストにも最終状態を送る
+        if (conn && conn.open) {
+          conn.send({ type: "state", state: gameState });
+        }
+        showResult();
+      }
+    }
+
+    function broadcastState() {
+      if (!conn || !conn.open) return;
+      conn.send({ type: "state", state: gameState });
+    }
+
+    // ==================== ゲスト入力送信 ====================
+    function sendGuestInput() {
+      if (isHost || !conn || !conn.open || !gameActive) return;
+
+      // ゲストの照準
+      const angle = Math.atan2(
+        mouseY - gameState.p2.y,
+        mouseX - gameState.p2.x
+      );
+
+      conn.send({
+        type: "input",
+        angle: angle,
+        fire: keys["_fireGuest"] || false,
+      });
+      keys["_fireGuest"] = false;
+    }
+
+    // ゲスト側：キー入力による移動もホストに送る必要があるが、
+    // 簡略化のためゲストの移動はホスト側で反映されない（仕様上、ゲストは射撃と照準のみ送信）
+    // → ゲストの移動はゲスト自身のローカル表示のみ更新し、ホストが権威状態を上書きする
+
+    // ==================== 描画 ====================
+    function render() {
+      ctx.clearRect(0, 0, W, H);
+
+      // 中央線
+      ctx.strokeStyle = "#0f3460";
+      ctx.lineWidth = 1;
+      ctx.setLineDash([8, 8]);
+      ctx.beginPath();
+      ctx.moveTo(W / 2, 0);
+      ctx.lineTo(W / 2, H);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // 弾
+      for (const b of gameState.bullets) {
+        ctx.fillStyle = b.owner === "p1" ? "#00d4ff" : "#ff4444";
+        ctx.shadowBlur = 8;
+        ctx.shadowColor = ctx.fillStyle;
+        ctx.beginPath();
+        ctx.arc(b.x, b.y, BULLET_SIZE / 2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.shadowBlur = 0;
+
+      // プレイヤー1（ホスト・青・左）
+      drawPlayer(gameState.p1, "#00d4ff", "P1");
+      // プレイヤー2（ゲスト・赤・右）
+      drawPlayer(gameState.p2, "#ff4444", "P2");
+
+      // HP バー
+      drawHPBar(20, 20, gameState.p1.hp, "#00d4ff", "P1");
+      drawHPBar(W - 220, 20, gameState.p2.hp, "#ff4444", "P2");
+    }
+
+    function drawPlayer(p, color, label) {
+      ctx.save();
+      ctx.translate(p.x, p.y);
+
+      // 照準線
+      ctx.strokeStyle = color + "44";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.lineTo(Math.cos(p.angle) * 400, Math.sin(p.angle) * 400);
+      ctx.stroke();
+
+      // 本体
+      ctx.fillStyle = color;
+      ctx.shadowBlur = 12;
+      ctx.shadowColor = color;
+      ctx.beginPath();
+      ctx.arc(0, 0, PLAYER_SIZE / 2, 0, Math.PI * 2);
+      ctx.fill();
+
+      // 砲身
+      ctx.strokeStyle = "#fff";
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.lineTo(
+        Math.cos(p.angle) * (PLAYER_SIZE / 2 + 8),
+        Math.sin(p.angle) * (PLAYER_SIZE / 2 + 8)
+      );
+      ctx.stroke();
+
+      ctx.shadowBlur = 0;
+      ctx.fillStyle = "#fff";
+      ctx.font = "bold 14px sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(label, 0, -PLAYER_SIZE / 2 - 12);
+
+      ctx.restore();
+    }
+
+    function drawHPBar(x, y, hp, color, label) {
+      const bw = 200, bh = 18;
+      ctx.fillStyle = "#222";
+      ctx.fillRect(x, y, bw, bh);
+      ctx.fillStyle = color;
+      ctx.fillRect(x, y, bw * (hp / MAX_HP), bh);
+      ctx.strokeStyle = "#fff";
+      ctx.lineWidth = 1;
+      ctx.strokeRect(x, y, bw, bh);
+      ctx.fillStyle = "#fff";
+      ctx.font = "12px sans-serif";
+      ctx.textAlign = "left";
+      ctx.fillText(label + " HP: " + hp, x, y + bh + 14);
+    }
+
+    function showResult() {
+      const w = gameState.winner;
+      if (w === "p1") {
+        overlay.textContent = isHost ? "🏆 勝利！" : "💀 敗北...";
+        overlay.style.color = isHost ? "#00d4ff" : "#ff4444";
+      } else if (w === "p2") {
+        overlay.textContent = isHost ? "💀 敗北..." : "🏆 勝利！";
+        overlay.style.color = isHost ? "#ff4444" : "#00d4ff";
+      } else {
+        overlay.textContent = "🤝 引き分け";
+        overlay.style.color = "#aaa";
+      }
+      setTimeout(() => {
+        matchBtn.disabled = false;
+        matched = false;
+        gameActive = false;
+      }, 3000);
+    }
+
+    // ==================== 入力ハンドラ ====================
+    window.addEventListener("keydown", (e) => {
+      keys[e.key] = true;
+      if (e.key.startsWith("Arrow")) e.preventDefault();
+    });
+    window.addEventListener("keyup", (e) => { keys[e.key] = false; });
+
+    canvas.addEventListener("mousemove", (e) => {
+      const rect = canvas.getBoundingClientRect();
+      mouseX = e.clientX - rect.left;
+      mouseY = e.clientY - rect.top;
+    });
+
+    canvas.addEventListener("mousedown", (e) => {
+      if (e.button !== 0) return;
+      if (!gameActive) return;
+      if (isHost) {
+        keys["_fireHost"] = true;
+      } else {
+        keys["_fireGuest"] = true;
+      }
+    });
+
+    matchBtn.addEventListener("click", requestMatch);
+    window.addEventListener("beforeunload", cancelMatch);
+
+    // ==================== メインループ ====================
+    function loop() {
+      if (isHost) {
+        updateGame();
+        render();
+      } else if (gameActive) {
+        // ゲストは入力送信と描画のみ（状態はホストから受信）
+        sendGuestInput();
+        // ゲストのローカル移動（表示用、ホスト権威のため上書きされる）
+        let dx = 0, dy = 0;
+        if (keys["ArrowUp"]) dy -= PLAYER_SPEED;
+        if (keys["ArrowDown"]) dy += PLAYER_SPEED;
+        if (keys["ArrowLeft"]) dx -= PLAYER_SPEED;
+        if (keys["ArrowRight"]) dx += PLAYER_SPEED;
+        gameState.p2.x = clamp(gameState.p2.x + dx, PLAYER_SIZE / 2, W - PLAYER_SIZE / 2);
+        gameState.p2.y = clamp(gameState.p2.y + dy, PLAYER_SIZE / 2, H - PLAYER_SIZE / 2);
+        gameState.p2.angle = Math.atan2(
+          mouseY - gameState.p2.y,
+          mouseX - gameState.p2.x
+        );
+        render();
+      }
+      requestAnimationFrame(loop);
+    }
+
+    // 初期描画
+    render();
+    loop();
+  </script>
+</body>
+</html>
