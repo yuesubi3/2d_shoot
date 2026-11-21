@@ -1,6 +1,6 @@
 {
   // "$schema": "./node_modules/wrangler/config-schema.json",
-  "name": "p2p-shooter",
+  "name": "2d_shoot",
   "main": "src/index.js",
   "compatibility_date": "2026-11-21",
   "assets": {
