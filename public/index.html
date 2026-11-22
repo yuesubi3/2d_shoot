@@ -63,6 +63,7 @@
   <h1>2Dシューター</h1>
   <div id="status">待機中...</div>
   <button id="matchBtn">マッチ開始</button>
+  <p style="font-size: 13px; color: #888;">移動: 矢印キー / 射撃: 左クリック / 壁設置: スペースキー</p>
   <div style="position: relative;">
     <canvas id="game" width="800" height="500"></canvas>
     <div id="overlay"></div>
@@ -81,6 +82,13 @@
     const FIRE_COOLDOWN = 200; // ms
     const HEAL_RATE = 2;        // 1秒あたりの回復量
     const HEAL_INTERVAL = 1000; // 回復間隔（ms）
+
+    // 壁関連
+    const WALL_CHARGE_INTERVAL = 8000; // 8秒ごとに1チャージ
+    const WALL_MAX_STOCK = 2;          // 最大2個までストック
+    const WALL_WIDTH = 16;
+    const WALL_HEIGHT = 100;
+    const WALL_OFFSET = 60;            // 自分のすぐ横（中心から60px）
 
     const canvas = document.getElementById("game");
     const ctx = canvas.getContext("2d");
@@ -101,6 +109,11 @@
       p1: { x: 80, y: H / 2, hp: MAX_HP, angle: 0 },   // ホスト（青・左）
       p2: { x: W - 80, y: H / 2, hp: MAX_HP, angle: Math.PI }, // ゲスト（赤・右）
       bullets: [],
+      walls: [],          // 壁の配列 { x, y, w, h, hp:1 }
+      p1WallStock: 1,     // ホストの壁ストック（初期1個）
+      p2WallStock: 1,     // ゲストの壁ストック（初期1個）
+      p1LastCharge: 0,    // ホストの最終チャージ時刻
+      p2LastCharge: 0,    // ゲストの最終チャージ時刻
       winner: null,
     };
 
@@ -165,28 +178,38 @@
         }
       });
 
-      conn.on("data", (data) => {
-        if (isHost) {
-          // ホスト：ゲストからの入力を受信
-          if (data.type === "input") {
-            gameState.p2.angle = data.angle;
-            if (data.fire) {
-              spawnBullet(gameState.p2, "p2");
-            }
+    conn.on("data", (data) => {
+      if (isHost) {
+        // ホスト：ゲストからの入力を受信
+        if (data.type === "input") {
+          gameState.p2.angle = data.angle;
+          if (data.fire) {
+            spawnBullet(gameState.p2, "p2");
           }
-        } else {
-          // ゲスト：ホストからの状態を受信
-          if (data.type === "state") {
-            gameState = data.state;
-            render();
-            // 勝敗確定を受信したら表示
-            if (gameState.winner && !overlay.textContent) {
-              gameActive = false;
-              showResult();
-            }
+                    // ゲストの移動を反映
+          let dx = 0, dy = 0;
+          if (data.keys.up) dy -= PLAYER_SPEED;
+          if (data.keys.down) dy += PLAYER_SPEED;
+          if (data.keys.left) dx -= PLAYER_SPEED;
+          if (data.keys.right) dx += PLAYER_SPEED;
+          const nx = clamp(gameState.p2.x + dx, PLAYER_SIZE / 2, W - PLAYER_SIZE / 2);
+          const ny = clamp(gameState.p2.y + dy, PLAYER_SIZE / 2, H - PLAYER_SIZE / 2);
+          if (!collidesWithWall(nx, gameState.p2.y)) gameState.p2.x = nx;
+          if (!collidesWithWall(gameState.p2.x, ny)) gameState.p2.y = ny;
+        } else if (data.type === "placeWall") {
+          spawnWall("p2");
+        }
+      } else {
+        if (data.type === "state") {
+          gameState = data.state;
+          render();
+          if (gameState.winner && !overlay.textContent) {
+            gameActive = false;
+            showResult();
           }
         }
-      });
+      }
+    });  
 
       conn.on("close", () => {
         if (gameActive) {
@@ -259,6 +282,34 @@
         owner: playerKey,
       });
     }
+    function spawnWall(playerKey) {
+      if (!isHost || !gameActive) return;
+
+      const stockKey = playerKey === "p1" ? "p1WallStock" : "p2WallStock";
+      if (gameState[stockKey] <= 0) return;
+
+      const player = gameState[playerKey];
+      const enemyKey = playerKey === "p1" ? "p2" : "p1";
+      const enemy = gameState[enemyKey];
+
+      // 自分と敵の間（自分のすぐ横）に設置
+      const dir = playerKey === "p1" ? 1 : -1;
+      const wx = player.x + dir * WALL_OFFSET;
+      const wy = player.y;
+
+      // 画面外・重なり防止（簡易）
+      if (wx < 0 || wx > W) return;
+
+      gameState.walls.push({
+        x: wx - WALL_WIDTH / 2,
+        y: wy - WALL_HEIGHT / 2,
+        w: WALL_WIDTH,
+        h: WALL_HEIGHT,
+        hp: 1,
+      });
+
+  gameState[stockKey]--;
+}
 
     function updateGame() {
       if (!isHost || !gameActive) return;
@@ -270,6 +321,18 @@
     gameState.p1.hp = Math.min(MAX_HP, gameState.p1.hp + HEAL_RATE);
     gameState.p2.hp = Math.min(MAX_HP, gameState.p2.hp + HEAL_RATE);
     }
+            // ---- 壁チャージ（ホスト=p1）----
+      if (gameState.p1WallStock < WALL_MAX_STOCK) {
+        if (gameState.p1LastCharge === 0) {
+          gameState.p1LastCharge = now;
+        } else if (now - gameState.p1LastCharge >= WALL_CHARGE_INTERVAL) {
+          gameState.p1WallStock++;
+          gameState.p1LastCharge = now;
+          if (gameState.p1WallStock >= WALL_MAX_STOCK) {
+            gameState.p1LastCharge = 0; // 満タンならリセット
+      }
+    }
+  }
 
       // ホスト自身の移動
       let dx = 0, dy = 0;
@@ -277,8 +340,10 @@
       if (keys["ArrowDown"]) dy += PLAYER_SPEED;
       if (keys["ArrowLeft"]) dx -= PLAYER_SPEED;
       if (keys["ArrowRight"]) dx += PLAYER_SPEED;
-      gameState.p1.x = clamp(gameState.p1.x + dx, PLAYER_SIZE / 2, W - PLAYER_SIZE / 2);
-      gameState.p1.y = clamp(gameState.p1.y + dy, PLAYER_SIZE / 2, H - PLAYER_SIZE / 2);
+      const newX = clamp(gameState.p1.x + dx, PLAYER_SIZE / 2, W - PLAYER_SIZE / 2);
+      const newY = clamp(gameState.p1.y + dy, PLAYER_SIZE / 2, H - PLAYER_SIZE / 2);
+      if (!collidesWithWall(newX, gameState.p1.y)) gameState.p1.x = newX;
+      if (!collidesWithWall(gameState.p1.x, newY)) gameState.p1.y = newY;
 
       // ホストの照準（マウス方向）
       gameState.p1.angle = Math.atan2(mouseY - gameState.p1.y, mouseX - gameState.p1.x);
@@ -301,6 +366,25 @@
           bullets.splice(i, 1);
           continue;
         }
+                // ---- 壁との当たり判定（ここから）----
+        let hitWall = false;
+        for (let j = gameState.walls.length - 1; j >= 0; j--) {
+          const wall = gameState.walls[j];
+          if (
+            b.x > wall.x - BULLET_SIZE / 2 &&
+            b.x < wall.x + wall.w + BULLET_SIZE / 2 &&
+            b.y > wall.y - BULLET_SIZE / 2 &&
+            b.y < wall.y + wall.h + BULLET_SIZE / 2
+          ) {
+            wall.hp--;
+            bullets.splice(i, 1);
+            hitWall = true;
+            if (wall.hp <= 0) gameState.walls.splice(j, 1);
+            break;
+          }
+        }
+        if (hitWall) continue;
+        // ---- 壁との当たり判定（ここまで）----
 
         // 当たり判定
         const targets = b.owner === "p1" ? ["p2"] : ["p1"];
@@ -332,6 +416,32 @@
         }
         showResult();
       }
+
+
+  // ---- 壁チャージ（ゲスト=p2）----
+  if (gameState.p2WallStock < WALL_MAX_STOCK) {
+    if (gameState.p2LastCharge === 0) {
+      gameState.p2LastCharge = now;
+    } else if (now - gameState.p2LastCharge >= WALL_CHARGE_INTERVAL) {
+      gameState.p2WallStock++;
+      gameState.p2LastCharge = now;
+      if (gameState.p2WallStock >= WALL_MAX_STOCK) {
+        gameState.p2LastCharge = 0;
+      }
+    }
+  }
+    }
+
+    function collidesWithWall(px, py) {
+      const r = PLAYER_SIZE / 2;
+      for (const wall of gameState.walls) {
+        // 円と矩形の当たり判定（簡易AABB）
+        const closestX = clamp(px, wall.x, wall.x + wall.w);
+        const closestY = clamp(py, wall.y, wall.y + wall.h);
+        const dist = Math.hypot(px - closestX, py - closestY);
+        if (dist < r) return true;
+      }
+      return false;
     }
 
     function broadcastState() {
@@ -353,6 +463,12 @@
         type: "input",
         angle: angle,
         fire: keys["_fireGuest"] || false,
+        keys: {
+          up: !!keys["ArrowUp"],
+          down: !!keys["ArrowDown"],
+          left: !!keys["ArrowLeft"],
+          right: !!keys["ArrowRight"],
+        },
       });
       keys["_fireGuest"] = false;
     }
@@ -394,6 +510,38 @@
       // HP バー
       drawHPBar(20, 20, gameState.p1.hp, "#00d4ff", "P1");
       drawHPBar(W - 220, 20, gameState.p2.hp, "#ff4444", "P2");
+      
+      // 壁ストック表示
+      drawWallStatus(20, H - 40, "あなた", isHost ? gameState.p1WallStock : gameState.p2WallStock,
+                     isHost ? gameState.p1LastCharge : gameState.p2LastCharge);
+      drawWallStatus(W - 220, H - 40, "相手", isHost ? gameState.p2WallStock : gameState.p1WallStock,
+                     isHost ? gameState.p2LastCharge : gameState.p1LastCharge);
+    
+      // 壁
+      for (const wall of gameState.walls) {
+        ctx.fillStyle = "#888";
+        ctx.shadowBlur = 6;
+        ctx.shadowColor = "#aaa";
+        ctx.fillRect(wall.x, wall.y, wall.w, wall.h);
+        ctx.shadowBlur = 0;
+        ctx.strokeStyle = "#ccc";
+        ctx.lineWidth = 2;
+        ctx.strokeRect(wall.x, wall.y, wall.w, wall.h);
+      }
+    }
+
+    function drawWallStatus(x, y, label, stock, lastCharge) {
+      let text = `${label}: 壁 ${stock}/${WALL_MAX_STOCK}`;
+      if (stock < WALL_MAX_STOCK && lastCharge > 0) {
+        const remain = Math.max(0, WALL_CHARGE_INTERVAL - (Date.now() - lastCharge));
+        text += ` (次まで ${(remain / 1000).toFixed(1)}秒)`;
+      } else if (stock >= WALL_MAX_STOCK) {
+        text += " (満タン)";
+      }
+      ctx.fillStyle = "#aaa";
+      ctx.font = "14px sans-serif";
+      ctx.textAlign = "left";
+      ctx.fillText(text, x, y);
     }
 
     function drawPlayer(p, color, label) {
@@ -472,10 +620,6 @@
     }
 
     // ==================== 入力ハンドラ ====================
-    window.addEventListener("keydown", (e) => {
-      keys[e.key] = true;
-      if (e.key.startsWith("Arrow")) e.preventDefault();
-    });
     window.addEventListener("keyup", (e) => { keys[e.key] = false; });
 
     canvas.addEventListener("mousemove", (e) => {
@@ -494,6 +638,21 @@
       }
     });
 
+    window.addEventListener("keydown", (e) => {
+      keys[e.key] = true;
+      if (e.key.startsWith("Arrow")) e.preventDefault();
+      if (e.key === " " && gameActive) {
+        e.preventDefault();
+        if (isHost) {
+          spawnWall("p1");
+        } else {
+          if (conn && conn.open) {
+            conn.send({ type: "placeWall" });
+          }   // ← if (conn && conn.open) の閉じ
+        }     // ← else の閉じ
+      }       // ← if (e.key === " ") の閉じ
+    });       // ← addEventListener の閉じ
+
     matchBtn.addEventListener("click", requestMatch);
     window.addEventListener("beforeunload", cancelMatch);
 
@@ -503,20 +662,7 @@
         updateGame();
         render();
       } else if (gameActive) {
-        // ゲストは入力送信と描画のみ（状態はホストから受信）
         sendGuestInput();
-        // ゲストのローカル移動（表示用、ホスト権威のため上書きされる）
-        let dx = 0, dy = 0;
-        if (keys["ArrowUp"]) dy -= PLAYER_SPEED;
-        if (keys["ArrowDown"]) dy += PLAYER_SPEED;
-        if (keys["ArrowLeft"]) dx -= PLAYER_SPEED;
-        if (keys["ArrowRight"]) dx += PLAYER_SPEED;
-        gameState.p2.x = clamp(gameState.p2.x + dx, PLAYER_SIZE / 2, W - PLAYER_SIZE / 2);
-        gameState.p2.y = clamp(gameState.p2.y + dy, PLAYER_SIZE / 2, H - PLAYER_SIZE / 2);
-        gameState.p2.angle = Math.atan2(
-          mouseY - gameState.p2.y,
-          mouseX - gameState.p2.x
-        );
         render();
       }
       requestAnimationFrame(loop);
