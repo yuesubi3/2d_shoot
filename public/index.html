@@ -123,7 +123,8 @@
     // 入力
     const keys = {};
     let mouseX = W / 2, mouseY = H / 2;
-    let lastFireTime = 0;
+    let lastFireTimeP1 = 0;
+    let lastFireTimeP2 = 0;
 
     // 弾の ID 管理（ホスト用）
     let nextBulletId = 0;
@@ -269,8 +270,10 @@
     // ==================== ゲームロジック（ホスト権威） ====================
     function spawnBullet(player, playerKey) {
       const now = Date.now();
-      if (now - lastFireTime < FIRE_COOLDOWN) return;
-      lastFireTime = now;
+      const lastTime = playerKey === "p1" ? lastFireTimeP1 : lastFireTimeP2;
+      if (now - lastTime < FIRE_COOLDOWN) return;
+      if (playerKey === "p1") lastFireTimeP1 = now;
+      else lastFireTimeP2 = now;
 
       const angle = player.angle;
       const bx = player.x + Math.cos(angle) * (PLAYER_SIZE / 2 + 4);
@@ -351,8 +354,8 @@
       // ホストの照準（マウス方向）
       gameState.p1.angle = Math.atan2(mouseY - gameState.p1.y, mouseX - gameState.p1.x);
 
-      // ホストの射撃
-      if (Date.now() - lastFireTime >= FIRE_COOLDOWN && keys["_fireHost"]) {
+      // ホストの攻撃(変更後)
+      if (keys["_fireHost"]) {
         spawnBullet(gameState.p1, "p1");
         keys["_fireHost"] = false;
       }
